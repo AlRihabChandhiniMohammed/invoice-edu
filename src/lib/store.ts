@@ -1,10 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { isBlobStorageEnabled, readBlobText, writeBlobText } from "./blob";
 import { COURSE_SEED } from "./courses-seed";
 import type { Database, Invoice, Settings } from "./types";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const DB_FILE = path.join(DATA_DIR, "db.json");
+const DB_BLOB = "invoice-edu/db.json";
 
 export const DEFAULT_SETTINGS: Settings = {
   companyName: "EduAltTech",
@@ -33,24 +35,45 @@ function freshDb(): Database {
   };
 }
 
+function normalizeDb(parsed: Partial<Database>): Database {
+  return {
+    settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
+    courses: parsed.courses?.length ? parsed.courses : freshDb().courses,
+    invoices: parsed.invoices ?? [],
+  };
+}
+
+async function seedDb(): Promise<Database> {
+  const db = freshDb();
+  try {
+    await writeDb(db);
+  } catch (error) {
+    console.error("Could not persist a fresh database.", error);
+  }
+  return db;
+}
+
 async function readDb(): Promise<Database> {
+  if (isBlobStorageEnabled()) {
+    const raw = await readBlobText(DB_BLOB);
+    return raw === null ? seedDb() : normalizeDb(JSON.parse(raw) as Partial<Database>);
+  }
+
   try {
     const raw = await fs.readFile(DB_FILE, "utf8");
-    const parsed = JSON.parse(raw) as Partial<Database>;
-    const db: Database = {
-      settings: { ...DEFAULT_SETTINGS, ...(parsed.settings ?? {}) },
-      courses: parsed.courses?.length ? parsed.courses : freshDb().courses,
-      invoices: parsed.invoices ?? [],
-    };
-    return db;
-  } catch {
-    const db = freshDb();
-    await writeDb(db);
-    return db;
+    return normalizeDb(JSON.parse(raw) as Partial<Database>);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return seedDb();
+    throw error;
   }
 }
 
 async function writeDb(db: Database): Promise<void> {
+  if (isBlobStorageEnabled()) {
+    await writeBlobText(DB_BLOB, JSON.stringify(db));
+    return;
+  }
+
   await fs.mkdir(DATA_DIR, { recursive: true });
   const tmp = `${DB_FILE}.${process.pid}.tmp`;
   await fs.writeFile(tmp, JSON.stringify(db, null, 2), "utf8");

@@ -1,10 +1,12 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { deleteBlob, isBlobStorageEnabled, readBlobText, writeBlobText } from "./blob";
 
 const DATA_DIR = path.join(process.cwd(), "data");
 const SIG_FILE = path.join(DATA_DIR, "signature.enc");
 const KEY_FILE = path.join(DATA_DIR, "signature.key");
+const SIG_BLOB = "invoice-edu/signature.enc";
 
 const MAX_BYTES = 2_000_000;
 const MIME_RE = /^data:(image\/(?:png|jpeg|webp));base64,([A-Za-z0-9+/=\s]+)$/;
@@ -28,6 +30,7 @@ async function getKey(create: boolean): Promise<Buffer> {
   }
 
   if (!create) throw new Error("Signature key not found.");
+  if (process.env.VERCEL) throw new Error("SIGNATURE_SECRET is not configured.");
   const key = crypto.randomBytes(32);
   await fs.mkdir(DATA_DIR, { recursive: true });
   await fs.writeFile(KEY_FILE, key.toString("hex"), { encoding: "utf8", mode: 0o600 });
@@ -58,6 +61,11 @@ export async function encryptSignature(dataUrl: string): Promise<void> {
     data: encrypted.toString("base64"),
   });
 
+  if (isBlobStorageEnabled()) {
+    await writeBlobText(SIG_BLOB, payload);
+    return;
+  }
+
   await fs.mkdir(DATA_DIR, { recursive: true });
   const tmp = `${SIG_FILE}.${process.pid}.tmp`;
   await fs.writeFile(tmp, payload, { encoding: "utf8", mode: 0o600 });
@@ -66,7 +74,10 @@ export async function encryptSignature(dataUrl: string): Promise<void> {
 
 export async function getSignatureDataUrl(): Promise<string> {
   try {
-    const raw = await fs.readFile(SIG_FILE, "utf8");
+    const raw = isBlobStorageEnabled()
+      ? await readBlobText(SIG_BLOB)
+      : await fs.readFile(SIG_FILE, "utf8");
+    if (!raw) return "";
     const payload = JSON.parse(raw) as {
       mime?: string;
       iv?: string;
@@ -93,6 +104,14 @@ export async function getSignatureDataUrl(): Promise<string> {
 }
 
 export async function hasEncryptedSignature(): Promise<boolean> {
+  if (isBlobStorageEnabled()) {
+    try {
+      return (await readBlobText(SIG_BLOB)) !== null;
+    } catch {
+      return false;
+    }
+  }
+
   try {
     await fs.access(SIG_FILE);
     return true;
@@ -102,5 +121,10 @@ export async function hasEncryptedSignature(): Promise<boolean> {
 }
 
 export async function deleteSignature(): Promise<void> {
+  if (isBlobStorageEnabled()) {
+    await deleteBlob(SIG_BLOB);
+    return;
+  }
+
   await fs.rm(SIG_FILE, { force: true });
 }
